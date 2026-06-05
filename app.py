@@ -1,357 +1,185 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+import plotly.express as px
 
-st.set_page_config(
-    page_title="Marketing Attribution Dashboard",
-    layout="wide"
-)
+st.set_page_config(page_title="Marketing Attribution & Budget Optimization", layout="wide")
 
-st.title("Multi-Touch Attribution Modelling Dashboard")
+st.title("📈 Marketing Attribution & Budget Optimization Platform")
+st.markdown("Analyze customer journeys, compare attribution models, and optimize marketing budgets.")
 
-# Load dataset
 df = pd.read_csv("ga_sessions.csv", low_memory=False)
 
-# Data Cleaning
-df['transactions'] = df['transactions'].fillna(0)
+df["transactions"] = df["transactions"].fillna(0)
+df["revenue"] = df["revenue"].fillna(0) / 1000000
 
-df['revenue'] = (
-    df['revenue']
-    .fillna(0)
-    / 1000000
+st.sidebar.header("Filters")
+channels = st.sidebar.multiselect(
+    "Marketing Channels",
+    options=sorted(df["channelGrouping"].dropna().unique()),
+    default=sorted(df["channelGrouping"].dropna().unique())
 )
 
-# =========================
-# Dataset Overview
-# =========================
+df = df[df["channelGrouping"].isin(channels)]
 
-st.header("Dataset Overview")
+col1, col2, col3, col4 = st.columns(4)
 
-col1, col2, col3 = st.columns(3)
+col1.metric("Sessions", f"{len(df):,}")
+col2.metric("Visitors", f"{df['fullVisitorId'].nunique():,}")
+col3.metric("Revenue", f"₹{df['revenue'].sum():,.0f}")
+col4.metric("Conversions", f"{df['transactions'].sum():,.0f}")
 
-col1.metric(
-    "Sessions",
-    f"{len(df):,}"
-)
-
-col2.metric(
-    "Visitors",
-    f"{df['fullVisitorId'].nunique():,}"
-)
-
-col3.metric(
-    "Revenue",
-    f"₹{df['revenue'].sum():,.0f}"
-)
-
-# =========================
-# Journey Creation
-# =========================
-
-df = df.sort_values(
-    ['fullVisitorId', 'visitStartTime']
-)
-
-df['converted'] = (
-    df['transactions'] > 0
-).astype(int)
+df = df.sort_values(["fullVisitorId", "visitStartTime"])
+df["converted"] = (df["transactions"] > 0).astype(int)
 
 journeys = (
-    df.groupby('fullVisitorId')
+    df.groupby("fullVisitorId")
     .agg({
-        'channelGrouping': list,
-        'converted': 'max',
-        'revenue': 'sum'
+        "channelGrouping": list,
+        "converted": "max",
+        "revenue": "sum"
     })
     .reset_index()
 )
 
-converted = journeys[
-    journeys['converted'] == 1
-]
+journeys["journey_length"] = journeys["channelGrouping"].apply(len)
+converted = journeys[journeys["converted"] == 1]
 
-# =========================
-# Journey Analysis
-# =========================
-
-st.header("Journey Analysis")
-
-journeys['journey_length'] = (
-    journeys['channelGrouping']
-    .apply(len)
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Overview", "Attribution Models", "Budget Optimization", "Executive Summary"]
 )
 
-fig, ax = plt.subplots()
+with tab1:
+    fig = px.histogram(
+        journeys,
+        x="journey_length",
+        nbins=20,
+        title="Customer Journey Length Distribution"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-journeys['journey_length'].hist(
-    bins=20,
-    ax=ax
-)
+with tab2:
 
-ax.set_title(
-    "Journey Length Distribution"
-)
+    first_touch = {}
+    last_touch = {}
+    linear = {}
+    time_decay = {}
 
-st.pyplot(fig)
+    for _, row in converted.iterrows():
+        path = row["channelGrouping"]
+        revenue = row["revenue"]
 
-# =========================
-# Attribution Models
-# =========================
+        first_touch[path[0]] = first_touch.get(path[0], 0) + revenue
+        last_touch[path[-1]] = last_touch.get(path[-1], 0) + revenue
 
-last_touch = {}
-first_touch = {}
-linear = {}
-time_decay = {}
+        share = revenue / len(path)
 
-for _, row in converted.iterrows():
+        for ch in path:
+            linear[ch] = linear.get(ch, 0) + share
 
-    path = row['channelGrouping']
-    revenue = row['revenue']
+        weights = [2 ** i for i in range(len(path))]
+        total_weight = sum(weights)
 
-    first_touch[path[0]] = (
-        first_touch.get(path[0], 0)
-        + revenue
+        for ch, w in zip(path, weights):
+            time_decay[ch] = time_decay.get(ch, 0) + revenue * w / total_weight
+
+    shapley = linear.copy()
+
+    comparison = pd.DataFrame({
+        "First Touch": pd.Series(first_touch),
+        "Last Touch": pd.Series(last_touch),
+        "Linear": pd.Series(linear),
+        "Time Decay": pd.Series(time_decay),
+        "Shapley": pd.Series(shapley)
+    }).fillna(0)
+
+    chart_df = comparison.reset_index().rename(columns={"index": "Channel"})
+
+    fig = px.bar(
+        chart_df,
+        x="Channel",
+        y=["First Touch", "Last Touch", "Shapley"],
+        barmode="group",
+        title="Attribution Model Comparison"
     )
 
-    last_touch[path[-1]] = (
-        last_touch.get(path[-1], 0)
-        + revenue
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(comparison.round(2), use_container_width=True)
+
+with tab3:
+
+    budget = pd.DataFrame({
+        "Channel": [
+            "Paid Search", "Social", "Display",
+            "Organic Search", "Referral",
+            "Affiliates", "Direct"
+        ],
+        "Spend": [
+            3000000, 2500000, 1500000,
+            1000000, 1200000,
+            800000, 500000
+        ]
+    })
+
+    roas = comparison[["Shapley"]].reset_index()
+    roas.columns = ["Channel", "Revenue"]
+
+    roas = roas.merge(budget, on="Channel", how="left").dropna()
+
+    roas["ROAS"] = roas["Revenue"] / roas["Spend"]
+
+    total_budget = roas["Spend"].sum()
+
+    roas["Weight"] = roas["ROAS"] / roas["ROAS"].sum()
+    roas["Optimized Budget"] = total_budget * roas["Weight"]
+
+    fig = px.bar(
+        roas,
+        x="Channel",
+        y="Optimized Budget",
+        title="Optimized Budget Allocation"
     )
 
-    share = revenue / len(path)
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(roas.round(2), use_container_width=True)
 
-    for channel in path:
-        linear[channel] = (
-            linear.get(channel, 0)
-            + share
-        )
-
-    weights = [
-        2 ** i
-        for i in range(len(path))
-    ]
-
-    total_weight = sum(weights)
-
-    for channel, weight in zip(
-        path,
-        weights
-    ):
-
-        credit = (
-            revenue
-            * weight
-            / total_weight
-        )
-
-        time_decay[channel] = (
-            time_decay.get(channel, 0)
-            + credit
-        )
-
-# Simplified Shapley
-shapley = linear.copy()
-
-comparison = pd.DataFrame({
-
-    "First Touch":
-    pd.Series(first_touch),
-
-    "Last Touch":
-    pd.Series(last_touch),
-
-    "Linear":
-    pd.Series(linear),
-
-    "Time Decay":
-    pd.Series(time_decay),
-
-    "Shapley":
-    pd.Series(shapley)
-
-}).fillna(0)
-
-comparison['Last Share %'] = (
-    comparison['Last Touch']
-    /
-    comparison['Last Touch'].sum()
-) * 100
-
-comparison['Shapley Share %'] = (
-    comparison['Shapley']
-    /
-    comparison['Shapley'].sum()
-) * 100
-
-comparison['Share Difference'] = (
-    comparison['Last Share %']
-    -
-    comparison['Shapley Share %']
-)
-
-# =========================
-# Attribution Comparison
-# =========================
-
-st.header(
-    "Attribution Comparison"
-)
-
-st.dataframe(
-    comparison.round(2)
-)
-
-# =========================
-# Attribution Bias Chart
-# =========================
-
-fig, ax = plt.subplots()
-
-comparison[
-    'Share Difference'
-].sort_values().plot(
-    kind='barh',
-    ax=ax
-)
-
-ax.set_title(
-    'Attribution Bias'
-)
-
-st.pyplot(fig)
-
-# =========================
-# Budget Optimisation
-# =========================
-
-st.header(
-    "Budget Optimisation"
-)
-
-budget = pd.DataFrame({
-
-    'Channel': [
-        'Paid Search',
-        'Social',
-        'Display',
-        'Organic Search',
-        'Referral',
-        'Affiliates',
-        'Direct'
-    ],
-
-    'Spend': [
-        3000000,
-        2500000,
-        1500000,
-        1000000,
-        1200000,
-        800000,
-        500000
-    ]
-
-})
-
-roas = comparison[
-    ['Shapley']
-].reset_index()
-
-roas.columns = [
-    'Channel',
-    'Revenue'
-]
-
-roas = roas.merge(
-    budget,
-    on='Channel',
-    how='left'
-)
-
-roas = roas.dropna()
-
-if len(roas) > 0:
-
-    roas['ROAS'] = (
-        roas['Revenue']
-        /
-        roas['Spend']
+    roas["Projected Revenue"] = (
+        roas["Revenue"]
+        * ((roas["Optimized Budget"] / roas["Spend"]) ** 0.30)
     )
 
-    total_budget = (
-        roas['Spend'].sum()
-    )
+    current_revenue = roas["Revenue"].sum()
+    future_revenue = roas["Projected Revenue"].sum()
 
-    roas['Weight'] = (
-        roas['ROAS']
-        /
-        roas['ROAS'].sum()
-    )
+    uplift = ((future_revenue - current_revenue) / current_revenue) * 100
 
-    roas['Optimized Budget'] = (
-        total_budget
-        *
-        roas['Weight']
-    )
+with tab4:
 
-    st.dataframe(
-        roas.round(2)
-    )
-
-    # Revenue Simulation
-
-    roas['Projected Revenue'] = (
-        roas['Revenue']
-        *
-        (
-            roas['Optimized Budget']
-            /
-            roas['Spend']
-        ) ** 0.30
-    )
-
-    current_revenue = (
-        roas['Revenue'].sum()
-    )
-
-    future_revenue = (
-        roas['Projected Revenue'].sum()
-    )
-
-    uplift = (
-        (
-            future_revenue
-            -
-            current_revenue
-        )
-        /
-        current_revenue
+    comparison["Last Share %"] = (
+        comparison["Last Touch"] / comparison["Last Touch"].sum()
     ) * 100
 
-    st.header(
-        "Executive Summary"
+    comparison["Shapley Share %"] = (
+        comparison["Shapley"] / comparison["Shapley"].sum()
+    ) * 100
+
+    comparison["Share Difference"] = (
+        comparison["Last Share %"] - comparison["Shapley Share %"]
     )
 
-    over_channel = (
-        comparison[
-            'Share Difference'
-        ].idxmax()
-    )
+    over_channel = comparison["Share Difference"].idxmax()
+    under_channel = comparison["Share Difference"].idxmin()
 
-    under_channel = (
-        comparison[
-            'Share Difference'
-        ].idxmin()
-    )
+    c1, c2, c3 = st.columns(3)
 
-    st.success(
-        f"Most Over-Credited Channel: {over_channel}"
-    )
+    c1.metric("Over-Credited Channel", over_channel)
+    c2.metric("Under-Credited Channel", under_channel)
+    c3.metric("Revenue Efficiency Gain", f"{uplift:.2f}%")
 
-    st.warning(
-        f"Most Under-Credited Channel: {under_channel}"
-    )
+    csv = comparison.to_csv(index=True)
 
-    st.info(
-        f"Projected Revenue Efficiency Improvement: {uplift:.2f}%"
+    st.download_button(
+        "Download Attribution Results",
+        csv,
+        "attribution_results.csv",
+        "text/csv"
     )
